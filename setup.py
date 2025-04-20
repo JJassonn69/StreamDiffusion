@@ -52,7 +52,7 @@ setup(
     license="Apache 2.0 License",
     author="Aki, kizamimi, ddPn08, Verb, ramune, teftef6220, Tonimono, Chenfeng Xu, Ararat with the help of all our contributors (https://github.com/cumulo-autumn/StreamDiffusion/graphs/contributors)",
     author_email="cumulokyoukai@gmail.com",
-    url="https://github.com/cumulo-autumn/StreamDiffusion",
+    url="https://github.com/JJassonn69/StreamDiffusion",
     package_dir={"": "src"},
     packages=find_packages("src"),
     package_data={"streamdiffusion": ["py.typed"]},
