@@ -66,6 +66,107 @@ OPENPOSE_COLORS = [
     [255, 170, 0], [255, 255, 0], [170, 255, 0], [85, 255, 0]
 ]
 
+# OpenPose Face connections (70 keypoints from diagram)
+OPENPOSE_FACE_CONNECTIONS = [
+    # Jawline (0-16)
+    (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10),
+    (10, 11), (11, 12), (12, 13), (13, 14), (14, 15), (15, 16),
+    # Left Eyebrow (17-21)
+    (17, 18), (18, 19), (19, 20), (20, 21),
+    # Right Eyebrow (22-26)
+    (22, 23), (23, 24), (24, 25), (25, 26),
+    # Nose Bridge (27-30)
+    (27, 28), (28, 29), (29, 30),
+    # Nose Lower (31-35)
+    (31, 32), (32, 33), (33, 34), (34, 35),
+    # Left Eye (36-41)
+    (36, 37), (37, 38), (38, 39), (39, 40), (40, 41), (41, 36),
+    # Right Eye (42-47)
+    (42, 43), (43, 44), (44, 45), (45, 46), (46, 47), (47, 42),
+    # Left Pupil 
+    (68, 68),
+    # Right Pupil
+    (69, 69),
+    # Outer Lips (48-59)
+    (48, 49), (49, 50), (50, 51), (51, 52), (52, 53), (53, 54),
+    (54, 55), (55, 56), (56, 57), (57, 58), (58, 59), (59, 48),
+    # Inner Lips (60-67)
+    (60, 61), (61, 62), (62, 63), (63, 64), (64, 65), (65, 66), (66, 67), (67, 60),
+    # Pupils (68-69)
+    (68, 68), (69, 69)
+]
+
+# Color mapping for face parts (BGR)
+# A simple color is assigned to each connection based on its group
+FACE_COLORS = list(
+    # Jawline (16 connections)
+    [(255, 255, 255)] * 16 +
+    # Right Eyebrow (4 connections)
+    [(0, 255, 0)] * 4 +
+    # Left Eyebrow (4 connections)
+    [(0, 255, 0)] * 4 +
+    # Nose Bridge (3 connections)
+    [(255, 0, 255)] * 3 +
+    # Nose Lower (4 connections)
+    [(255, 0, 255)] * 4 +
+    # Right Eye (6 connections)
+    [(0, 0, 255)] * 6 +
+    # Left Eye (6 connections)
+    [(0, 0, 255)] * 6 +
+    # Outer Lips (12 connections)
+    [(255, 0, 0)] * 12 +
+    # Inner Lips (8 connections)
+    [(255, 0, 0)] * 8 +
+    # Pupils (2 connections)
+    [(255, 0, 0)] * 2
+    
+)
+
+
+# A mapping from MediaPipe's 468 face landmarks to OpenPose's 70 face keypoints.
+# This mapping has been manually created by referencing the official MediaPipe
+# 468 landmark diagram and the OpenPose 70 keypoint standard.
+MEDIAPIPE_TO_OPENPOSE_FACE_MAP = {
+    # Jawline (OpenPose 0-16) - Mapped to follow the outer contour from MediaPipe diagram
+    0: 127,  # Subject's Right Jaw - upper part, near ear/cheek connection
+    1: 234,   # Moving down along the right jaw
+    2: 93,
+    3: 132,
+    4: 58,
+    5: 172,
+    6: 136,
+    7: 150,   # Subject's Right Jaw - point closest to chin tip
+    8: 152,   # Chin Tip
+    9: 400,   # Subject's Left Jaw - point closest to chin tip
+    10: 365,  # Moving up along the left jaw
+    11: 397,
+    12: 435,
+    13: 401,
+    14: 323,
+    15: 454,
+    16: 356    # Subject's Left Jaw - upper part, near ear/cheek connection
+,
+    # Left Eyebrow (OpenPose 17-21)
+    17: 55, 18: 65, 19: 52, 20: 53, 21: 46,
+    # Right Eyebrow (OpenPose 22-26)
+    22: 285, 23: 295, 24: 282, 25: 283, 26: 276,
+    # Nose Bridge (OpenPose 27-30)
+    27: 168, 28: 197, 29: 5, 30: 4,
+    # Nose Lower (OpenPose 31-35)
+    31: 166, 32: 44, 33: 19, 34: 457, 35: 455,
+    # Left Eye (OpenPose 36-41)
+    36: 33, 37: 160, 38: 158, 39: 155, 40: 145, 41: 163,
+    # Right Eye (OpenPose 42-47)
+    42: 463, 43: 385, 44: 388, 45: 263, 46: 373, 47: 381,
+    # Outer Lips (OpenPose 48-59)
+    48: 185, 49: 39, 50: 37, 51: 0, 52: 267, 53: 270, 54: 409, 55: 321, 56: 314, 57: 17, 58: 181, 59: 146,
+    # Inner Lips (OpenPose 60-67)
+    60: 78, 61: 81, 62: 13, 63: 311, 64: 409, 65: 402, 66: 14, 67: 178,
+    # Pupils (OpenPose 68-69) - Approximated from nearby landmarks as pupils are not in the 468 set
+    68: 468, # Approximation for Left Pupil (subject's left)
+    69: 473, # Approximation for Right Pupil (subject's right)
+}
+
 
 class MediaPipePosePreprocessor(BasePreprocessor):
     """
@@ -356,6 +457,52 @@ class MediaPipePosePreprocessor(BasePreprocessor):
         
         return image
     
+    def _draw_face_keypoints(self, image: np.ndarray, face_landmarks: List) -> np.ndarray:
+        """
+        Draw face landmarks in OpenPose style.
+
+        Args:
+            image: Input image canvas.
+            face_landmarks: MediaPipe face landmarks (468 points).
+
+        Returns:
+            Image with face skeleton drawn.
+        """
+        if not face_landmarks:
+            return image
+
+        h, w = image.shape[:2]
+        line_thickness = self.params.get('line_thickness', 2)
+        confidence_threshold = self.params.get('confidence_threshold', 0.3)
+
+        # Convert MediaPipe landmarks to a list of (x, y, conf) tuples
+        mp_points = []
+        for landmark in face_landmarks:
+            x = landmark.x * w
+            y = landmark.y * h
+            # Face landmarks don't have visibility/confidence, so we assume 1.0
+            confidence = 1.0
+            mp_points.append([x, y, confidence])
+
+        # Map the 468 MediaPipe points to the 70 OpenPose points
+        openpose_face_keypoints = [[0.0, 0.0, 0.0] for _ in range(70)]
+        for openpose_idx, mediapipe_idx in MEDIAPIPE_TO_OPENPOSE_FACE_MAP.items():
+            if mediapipe_idx < len(mp_points):
+                openpose_face_keypoints[openpose_idx] = mp_points[mediapipe_idx]
+
+        # Draw connections
+        for i, (start_idx, end_idx) in enumerate(OPENPOSE_FACE_CONNECTIONS):
+            if (start_idx < len(openpose_face_keypoints) and end_idx < len(openpose_face_keypoints) and
+                openpose_face_keypoints[start_idx][2] >= confidence_threshold and
+                openpose_face_keypoints[end_idx][2] >= confidence_threshold):
+
+                start_point = (int(openpose_face_keypoints[start_idx][0]), int(openpose_face_keypoints[start_idx][1]))
+                end_point = (int(openpose_face_keypoints[end_idx][0]), int(openpose_face_keypoints[end_idx][1]))
+                color = FACE_COLORS[i % len(FACE_COLORS)]
+                cv2.line(image, start_point, end_point, color, line_thickness)
+
+        return image
+    
     def process(self, image: Union[Image.Image, np.ndarray]) -> Image.Image:
         """
         Apply MediaPipe pose detection and create OpenPose-style annotation
@@ -409,6 +556,13 @@ class MediaPipePosePreprocessor(BasePreprocessor):
                 pose_image = self._draw_hand_keypoints(
                     pose_image, results.right_hand_landmarks.landmark, is_left_hand=False
                 )
+        
+        # Draw face if enabled
+        draw_face = self.params.get('draw_face', False)
+        if draw_face and results.face_landmarks:
+            pose_image = self._draw_face_keypoints(
+                pose_image, results.face_landmarks.landmark
+            )
         
         # Convert back to PIL
         pose_pil = Image.fromarray(cv2.cvtColor(pose_image, cv2.COLOR_BGR2RGB))
