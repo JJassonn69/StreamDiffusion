@@ -3,6 +3,8 @@ import torch
 import cv2
 from PIL import Image, ImageDraw
 from typing import Union, Optional, List, Tuple, Dict
+import logging
+logger = logging.getLogger(__name__)
 from .base import BasePreprocessor
 
 try:
@@ -22,7 +24,6 @@ MEDIAPIPE_TO_OPENPOSE_MAP = {
     # 15: REye, 16: LEye, 17: REar, 18: LEar, 19: LBigToe,
     # 20: LSmallToe, 21: LHeel, 22: RBigToe, 23: RSmallToe, 24: RHeel
     
-    0: 0,   # Nose -> Nose
     1: None, # Neck (calculated from shoulders)
     2: 12,  # RShoulder -> RightShoulder
     3: 14,  # RElbow -> RightElbow  
@@ -37,10 +38,6 @@ MEDIAPIPE_TO_OPENPOSE_MAP = {
     12: 23, # LHip -> LeftHip
     13: 25, # LKnee -> LeftKnee
     14: 27, # LAnkle -> LeftAnkle
-    15: 5,  # REye -> RightEye
-    16: 2,  # LEye -> LeftEye
-    17: 8,  # REar -> RightEar
-    18: 7,  # LEar -> LeftEar
     19: 31, # LBigToe -> LeftFootIndex
     20: 31, # LSmallToe -> LeftFootIndex (approximation)
     21: 29, # LHeel -> LeftHeel
@@ -53,16 +50,14 @@ MEDIAPIPE_TO_OPENPOSE_MAP = {
 OPENPOSE_LIMB_SEQUENCE = [
     [1, 2], [1, 5], [2, 3], [3, 4], [5, 6], [6, 7],
     [1, 8], [8, 9], [9, 10], [10, 11], [8, 12], [12, 13], 
-    [13, 14], [1, 0], [0, 15], [15, 17], [0, 16], [16, 18],
-    [14, 19], [19, 20], [14, 21], [11, 22], [22, 23], [11, 24]
+    [13, 14], [14, 19], [19, 20], [14, 21], [11, 22], [22, 23], [11, 24]
 ]
 
 # Standard OpenPose colors (BGR format) - matching actual OpenPose output
 OPENPOSE_COLORS = [
     [255, 0, 0], [255, 85, 0], [255, 170, 0], [255, 255, 0], [170, 255, 0], 
     [85, 255, 0], [0, 255, 0], [0, 255, 85], [0, 255, 170], [0, 255, 255], 
-    [0, 170, 255], [0, 85, 255], [0, 0, 255], [85, 0, 255], [170, 0, 255], 
-    [255, 0, 255], [255, 0, 170], [255, 0, 85], [255, 0, 0], [255, 85, 0],
+    [0, 170, 255], [0, 85, 255], [0, 0, 255], [255, 0, 0], [255, 85, 0],
     [255, 170, 0], [255, 255, 0], [170, 255, 0], [85, 255, 0]
 ]
 
@@ -128,23 +123,23 @@ FACE_COLORS = list(
 # 468 landmark diagram and the OpenPose 70 keypoint standard.
 MEDIAPIPE_TO_OPENPOSE_FACE_MAP = {
     # Jawline (OpenPose 0-16) - Mapped to follow the outer contour from MediaPipe diagram
-    0: 127,  # Subject's Right Jaw - upper part, near ear/cheek connection
-    1: 234,   # Moving down along the right jaw
+    0: 127,  # Subject's Left Jaw - upper part, near ear/cheek connection
+    1: 234,   # Moving down along the left jaw
     2: 93,
     3: 132,
     4: 58,
     5: 172,
     6: 136,
-    7: 150,   # Subject's Right Jaw - point closest to chin tip
+    7: 150,   # Subject's Left Jaw - point closest to chin tip
     8: 152,   # Chin Tip
-    9: 400,   # Subject's Left Jaw - point closest to chin tip
-    10: 365,  # Moving up along the left jaw
+    9: 400,   # Subject's Right Jaw - point closest to chin tip
+    10: 365,  # Moving up along the right jaw
     11: 397,
     12: 435,
     13: 401,
     14: 323,
     15: 454,
-    16: 356    # Subject's Left Jaw - upper part, near ear/cheek connection
+    16: 356    # Subject's Right Jaw - upper part, near ear/cheek connection
 ,
     # Left Eyebrow (OpenPose 17-21)
     17: 55, 18: 65, 19: 52, 20: 53, 21: 46,
@@ -189,7 +184,7 @@ class MediaPipePosePreprocessor(BasePreprocessor):
                  model_complexity: int = 1,
                  static_image_mode: bool = True,
                  draw_hands: bool = True,
-                 draw_face: bool = False,  # Simplified - disable face by default
+                 draw_face: bool = True,
                  line_thickness: int = 2,
                  circle_radius: int = 4,
                  confidence_threshold: float = 0.3,  # TouchDesigner-style confidence filtering
@@ -242,6 +237,8 @@ class MediaPipePosePreprocessor(BasePreprocessor):
         self._current_options = None
         # TouchDesigner-style smoothing buffers
         self._smoothing_buffers = {}
+        # Pre-compute index array for fast face mapping
+        self._face_idx = np.fromiter([MEDIAPIPE_TO_OPENPOSE_FACE_MAP[i] for i in range(70)], dtype=np.int32)
     
     @property
     def detector(self):
@@ -258,12 +255,12 @@ class MediaPipePosePreprocessor(BasePreprocessor):
             if self._detector is not None:
                 self._detector.close()
                 
-            print(f"MediaPipePosePreprocessor.detector: Initializing MediaPipe Holistic detector")
+            logger.info("MediaPipePosePreprocessor.detector: Initializing MediaPipe Holistic detector")
             self._detector = mp.solutions.holistic.Holistic(
                 static_image_mode=new_options['static_image_mode'],
                 model_complexity=new_options['model_complexity'],
                 enable_segmentation=False,
-                refine_face_landmarks=False,  # Keep simple
+                refine_face_landmarks=True,
                 min_detection_confidence=new_options['min_detection_confidence'],
                 min_tracking_confidence=new_options['min_tracking_confidence'],
             )
@@ -475,29 +472,18 @@ class MediaPipePosePreprocessor(BasePreprocessor):
         line_thickness = self.params.get('line_thickness', 2)
         confidence_threshold = self.params.get('confidence_threshold', 0.3)
 
-        # Convert MediaPipe landmarks to a list of (x, y, conf) tuples
-        mp_points = []
-        for landmark in face_landmarks:
-            x = landmark.x * w
-            y = landmark.y * h
-            # Face landmarks don't have visibility/confidence, so we assume 1.0
-            confidence = 1.0
-            mp_points.append([x, y, confidence])
+        # Vectorised conversion of 468 face landmarks (x,y) and mapping to 70-point OpenPose order
+        pts = np.stack([(lm.x * w, lm.y * h) for lm in face_landmarks], axis=0).astype(np.float32)
 
-        # Map the 468 MediaPipe points to the 70 OpenPose points
-        openpose_face_keypoints = [[0.0, 0.0, 0.0] for _ in range(70)]
-        for openpose_idx, mediapipe_idx in MEDIAPIPE_TO_OPENPOSE_FACE_MAP.items():
-            if mediapipe_idx < len(mp_points):
-                openpose_face_keypoints[openpose_idx] = mp_points[mediapipe_idx]
+        # Map to 70-point OpenPose order in a single take
+        openpose_pts = pts[self._face_idx]  # (70,2)
 
         # Draw connections
+                # Draw connections using the mapped 70-point array
         for i, (start_idx, end_idx) in enumerate(OPENPOSE_FACE_CONNECTIONS):
-            if (start_idx < len(openpose_face_keypoints) and end_idx < len(openpose_face_keypoints) and
-                openpose_face_keypoints[start_idx][2] >= confidence_threshold and
-                openpose_face_keypoints[end_idx][2] >= confidence_threshold):
-
-                start_point = (int(openpose_face_keypoints[start_idx][0]), int(openpose_face_keypoints[start_idx][1]))
-                end_point = (int(openpose_face_keypoints[end_idx][0]), int(openpose_face_keypoints[end_idx][1]))
+            if start_idx < openpose_pts.shape[0] and end_idx < openpose_pts.shape[0]:
+                start_point = tuple(openpose_pts[start_idx].astype(int))
+                end_point = tuple(openpose_pts[end_idx].astype(int))
                 color = FACE_COLORS[i % len(FACE_COLORS)]
                 cv2.line(image, start_point, end_point, color, line_thickness)
 
@@ -521,7 +507,7 @@ class MediaPipePosePreprocessor(BasePreprocessor):
         image_resized = image.resize((detect_resolution, detect_resolution), Image.LANCZOS)
         
         # Convert to RGB numpy array for MediaPipe
-        rgb_image = cv2.cvtColor(np.array(image_resized), cv2.COLOR_BGR2RGB)
+        rgb_image = np.asarray(image_resized)  # Already RGB, avoid extra conversion
         
         # Run MediaPipe detection
         results = self.detector.process(rgb_image)
@@ -558,14 +544,14 @@ class MediaPipePosePreprocessor(BasePreprocessor):
                 )
         
         # Draw face if enabled
-        draw_face = self.params.get('draw_face', False)
+        draw_face = self.params.get('draw_face', True)
         if draw_face and results.face_landmarks:
             pose_image = self._draw_face_keypoints(
                 pose_image, results.face_landmarks.landmark
             )
         
         # Convert back to PIL
-        pose_pil = Image.fromarray(cv2.cvtColor(pose_image, cv2.COLOR_BGR2RGB))
+        pose_pil = Image.fromarray(pose_image[:, :, ::-1])  # BGR -> RGB with channel flip
         
         # Resize to target resolution
         image_resolution = self.params.get('image_resolution', 512)
@@ -591,7 +577,7 @@ class MediaPipePosePreprocessor(BasePreprocessor):
     
     def reset_smoothing_buffers(self):
         """Reset smoothing buffers (useful for new sequences)"""
-        print("MediaPipePosePreprocessor.reset_smoothing_buffers: Clearing smoothing buffers")
+        logger.info("MediaPipePosePreprocessor.reset_smoothing_buffers: Clearing smoothing buffers")
         self._smoothing_buffers.clear()
     
     def __del__(self):
