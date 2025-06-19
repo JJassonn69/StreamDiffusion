@@ -1,15 +1,54 @@
+from __future__ import annotations
+
 import numpy as np
 import torch
 import cv2
+import os
+import time
+import contextlib
+import logging
+from pathlib import Path
 from PIL import Image, ImageDraw
 from typing import Union, Optional, List, Tuple, Dict
 from .base import BasePreprocessor
 
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def profile_span(name: str):
+    """Context manager that logs wall-clock duration of a code span.
+
+    Example::
+        with profile_span("pose_detector"):
+            result = self.pose_detector.detect(...)
+    """
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        # Debug level so production users can enable if desired
+        logger.debug("%s took %.2f ms", name, elapsed_ms)
+
 try:
     import mediapipe as mp
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
     MEDIAPIPE_AVAILABLE = True
 except ImportError:
     MEDIAPIPE_AVAILABLE = False
+
+# Get the path to the mediapipe_models directory
+MODELS_DIR = Path(__file__).parent / 'mediapipe_models'
+
+# Default model paths
+DEFAULT_POSE_MODEL = str(MODELS_DIR / 'pose_landmarker_full.task')
+DEFAULT_FACE_MODEL = str(MODELS_DIR / 'face_landmarker.task')
+DEFAULT_HAND_MODEL = str(MODELS_DIR / 'hand_landmarker.task')
 
 # MediaPipe to OpenPose keypoint mapping
 # MediaPipe has 33 keypoints, OpenPose has 25 keypoints
@@ -180,17 +219,37 @@ class MediaPipePosePreprocessor(BasePreprocessor):
     def __init__(self,
                  detect_resolution: int = 512,
                  image_resolution: int = 512,
-                 min_detection_confidence: float = 0.5,
-                 min_tracking_confidence: float = 0.5,
-                 model_complexity: int = 1,
-                 static_image_mode: bool = True,
-                 draw_hands: bool = True,
-                 draw_face: bool = False,  # Simplified - disable face by default
+                 # General MediaPipe Task options
+                 running_mode: str = "VIDEO",  # IMAGE, VIDEO, LIVE_STREAM
+                 # Pose Landmarker options
+                 pose_model_path: Optional[str] = None,
+                 enable_pose: bool = True,
+                 pose_min_detection_confidence: float = 0.5,
+                 pose_min_tracking_confidence: float = 0.5,
+                 pose_model_complexity: int = 1,
+                 num_poses: int = 1,
+                 # Face Landmarker options
+                 face_model_path: Optional[str] = None,
+                 enable_face: bool = True,
+                 face_min_detection_confidence: float = 0.5,
+                 face_min_tracking_confidence: float = 0.5,
+                 face_model_complexity: int = 1,
+                 num_faces: int = 1,
+                 output_face_blendshapes: bool = False,
+                 # Hand Landmarker options
+                 hand_model_path: Optional[str] = None,
+                 enable_hands: bool = True,
+                 hand_min_detection_confidence: float = 0.5,
+                 hand_min_tracking_confidence: float = 0.5,
+                 hand_model_complexity: int = 1,
+                 num_hands: int = 2,
+                 # Drawing options
                  line_thickness: int = 2,
                  circle_radius: int = 4,
-                 confidence_threshold: float = 0.3,  # TouchDesigner-style confidence filtering
-                 enable_smoothing: bool = True,  # TouchDesigner-inspired smoothing
-                 smoothing_factor: float = 0.7,  # Smoothing strength
+                 confidence_threshold: float = 0.3,
+                 # Smoothing options
+                 enable_smoothing: bool = True,
+                 smoothing_factor: float = 0.7,
                  **kwargs):
         """
         Initialize MediaPipe pose preprocessor with TouchDesigner-inspired improvements
@@ -220,51 +279,183 @@ class MediaPipePosePreprocessor(BasePreprocessor):
         super().__init__(
             detect_resolution=detect_resolution,
             image_resolution=image_resolution,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence,
-            model_complexity=model_complexity,
-            static_image_mode=static_image_mode,
-            draw_hands=draw_hands,
-            draw_face=draw_face,
-            line_thickness=line_thickness,
-            circle_radius=circle_radius,
-            confidence_threshold=confidence_threshold,
-            enable_smoothing=enable_smoothing,
-            smoothing_factor=smoothing_factor,
             **kwargs
         )
         
+        # Store all parameters in self._params for easy access
+        self.params.update({
+            'running_mode': running_mode,
+            # Pose parameters
+            'pose_model_path': pose_model_path,
+            'enable_pose': enable_pose,
+            'pose_min_detection_confidence': pose_min_detection_confidence,
+            'pose_min_tracking_confidence': pose_min_tracking_confidence,
+            'pose_model_complexity': pose_model_complexity,
+            'num_poses': num_poses,
+            # Face parameters
+            'face_model_path': face_model_path,
+            'enable_face': enable_face,
+            'face_min_detection_confidence': face_min_detection_confidence,
+            'face_min_tracking_confidence': face_min_tracking_confidence,
+            'face_model_complexity': face_model_complexity,
+            'num_faces': num_faces,
+            'output_face_blendshapes': output_face_blendshapes,
+            # Hand parameters
+            'hand_model_path': hand_model_path,
+            'enable_hands': enable_hands,
+            'hand_min_detection_confidence': hand_min_detection_confidence,
+            'hand_min_tracking_confidence': hand_min_tracking_confidence,
+            'hand_model_complexity': hand_model_complexity,
+            'num_hands': num_hands,
+            # Drawing parameters
+            'line_thickness': line_thickness,
+            'circle_radius': circle_radius,
+            'confidence_threshold': confidence_threshold,
+            # Smoothing parameters
+            'enable_smoothing': enable_smoothing,
+            'smoothing_factor': smoothing_factor,
+        })
+        
+        # Initialize detector placeholders
+        self._pose_detector = None
+        self._face_detector = None
+        self._hand_detector = None
+        self._current_timestamp_ms = 0
+        
+        # For backward compatibility
         self._detector = None
         self._current_options = None
+        
         # TouchDesigner-style smoothing buffers
         self._smoothing_buffers = {}
+        
+        # Live stream result storage
+        self._latest_pose_result = None
+        self._latest_face_result = None
+        self._latest_hand_result = None
+        
+    def _pose_callback(self, result: vision.PoseLandmarkerResult, output_image: mp.Image, timestamp_ms: int):
+        """Callback for pose detection in LIVE_STREAM mode"""
+        self._latest_pose_result = result
+        
+    def _face_callback(self, result: vision.FaceLandmarkerResult, output_image: mp.Image, timestamp_ms: int):
+        """Callback for face detection in LIVE_STREAM mode"""
+        self._latest_face_result = result
+        
+    def _hand_callback(self, result: vision.HandLandmarkerResult, output_image: mp.Image, timestamp_ms: int):
+        """Callback for hand detection in LIVE_STREAM mode"""
+        self._latest_hand_result = result
+    
+    @property
+    def pose_detector(self):
+        """Lazy loading of the MediaPipe Pose Landmarker"""
+        if not self.params.get('enable_pose', True):
+            return None
+            
+        if self._pose_detector is None:
+            # Try to use user-specified model path first
+            model_path = self.params.get('pose_model_path')
+            
+            # If no user path or it doesn't exist, try our local model
+            if not model_path or not os.path.exists(model_path):
+                model_path = DEFAULT_POSE_MODEL
+                if not os.path.exists(model_path):
+                    logger.warning(f"Local model {DEFAULT_POSE_MODEL} not found, using MediaPipe default model")
+                    model_path = mp.solutions.pose.POSE_LANDMARKER_HEAVY
+            
+            base_options = python.BaseOptions(
+                model_asset_path=model_path
+            )
+            running_mode = getattr(vision.RunningMode, self.params.get('running_mode', 'VIDEO').upper())
+            options = vision.PoseLandmarkerOptions(
+                base_options=base_options,
+                running_mode=running_mode,
+                num_poses=self.params.get('num_poses', 1),
+                min_pose_detection_confidence=self.params.get('pose_min_detection_confidence', 0.5),
+                min_tracking_confidence=self.params.get('pose_min_tracking_confidence', 0.5),
+                min_pose_presence_confidence=self.params.get('pose_min_detection_confidence', 0.5),
+                output_segmentation_masks=False
+            )
+            self._pose_detector = vision.PoseLandmarker.create_from_options(options)
+            
+        return self._pose_detector
+    
+    @property
+    def face_detector(self):
+        """Lazy loading of the MediaPipe Face Landmarker"""
+        if not self.params.get('enable_face', False):
+            return None
+            
+        if self._face_detector is None:
+            # Try to use user-specified model path first
+            model_path = self.params.get('face_model_path')
+            
+            # If no user path or it doesn't exist, try our local model
+            if not model_path or not os.path.exists(model_path):
+                model_path = DEFAULT_FACE_MODEL
+                if not os.path.exists(model_path):
+                    logger.warning(f"Local model {DEFAULT_FACE_MODEL} not found, using MediaPipe default model")
+                    model_path = mp.solutions.face_mesh.FACE_LANDMARKER_MODEL
+            
+            base_options = python.BaseOptions(
+                model_asset_path=model_path
+            )
+            running_mode = getattr(vision.RunningMode, self.params.get('running_mode', 'VIDEO').upper())
+            options = vision.FaceLandmarkerOptions(
+                base_options=base_options,
+                running_mode=running_mode,
+                num_faces=self.params.get('num_faces', 1),
+                min_face_detection_confidence=self.params.get('face_min_detection_confidence', 0.5),
+                min_tracking_confidence=self.params.get('face_min_tracking_confidence', 0.5),
+                min_face_presence_confidence=self.params.get('face_min_detection_confidence', 0.5),
+                output_face_blendshapes=self.params.get('output_face_blendshapes', False)
+            )
+            self._face_detector = vision.FaceLandmarker.create_from_options(options)
+            
+        return self._face_detector
+    
+    @property
+    def hand_detector(self):
+        """Lazy loading of the MediaPipe Hand Landmarker"""
+        if not self.params.get('enable_hands', True):
+            return None
+            
+        if self._hand_detector is None:
+            # Try to use user-specified model path first
+            model_path = self.params.get('hand_model_path')
+            
+            # If no user path or it doesn't exist, try our local model
+            if not model_path or not os.path.exists(model_path):
+                model_path = DEFAULT_HAND_MODEL
+                if not os.path.exists(model_path):
+                    logger.warning(f"Local model {DEFAULT_HAND_MODEL} not found, using MediaPipe default model")
+                    model_path = mp.solutions.hands.HAND_LANDMARKER_MODEL
+            
+            base_options = python.BaseOptions(
+                model_asset_path=model_path
+            )
+            running_mode = getattr(vision.RunningMode, self.params.get('running_mode', 'VIDEO').upper())
+            options = vision.HandLandmarkerOptions(
+                base_options=base_options,
+                running_mode=running_mode,
+                num_hands=self.params.get('num_hands', 2),
+                min_hand_detection_confidence=self.params.get('hand_min_detection_confidence', 0.5),
+                min_tracking_confidence=self.params.get('hand_min_tracking_confidence', 0.5),
+                min_hand_presence_confidence=self.params.get('hand_min_detection_confidence', 0.5)
+            )
+            self._hand_detector = vision.HandLandmarker.create_from_options(options)
+            
+        return self._hand_detector
     
     @property
     def detector(self):
-        """Lazy loading of the MediaPipe Holistic detector"""
-        new_options = {
-            'min_detection_confidence': self.params.get('min_detection_confidence', 0.5),
-            'min_tracking_confidence': self.params.get('min_tracking_confidence', 0.5),
-            'model_complexity': self.params.get('model_complexity', 1),
-            'static_image_mode': self.params.get('static_image_mode', True),
-        }
-        
-        # Initialize or update detector if needed
-        if self._detector is None or self._current_options != new_options:
-            if self._detector is not None:
-                self._detector.close()
-                
-            print(f"MediaPipePosePreprocessor.detector: Initializing MediaPipe Holistic detector")
-            self._detector = mp.solutions.holistic.Holistic(
-                static_image_mode=new_options['static_image_mode'],
-                model_complexity=new_options['model_complexity'],
-                enable_segmentation=False,
-                refine_face_landmarks=False,  # Keep simple
-                min_detection_confidence=new_options['min_detection_confidence'],
-                min_tracking_confidence=new_options['min_tracking_confidence'],
-            )
-            self._current_options = new_options
-            
+        """Deprecated: Backward compatibility for holistic detector"""
+        import warnings
+        warnings.warn(
+            "The 'detector' property is deprecated. Please update your code to use the new modular detectors: "
+            "pose_detector, face_detector, and hand_detector.",
+            DeprecationWarning
+        )
         return self._detector
     
     def _apply_smoothing(self, keypoints: List[List[float]], pose_id: str = "default") -> List[List[float]]:
@@ -501,7 +692,7 @@ class MediaPipePosePreprocessor(BasePreprocessor):
     
     def process(self, image: Union[Image.Image, np.ndarray]) -> Image.Image:
         """
-        Apply MediaPipe pose detection and create OpenPose-style annotation
+        Apply MediaPipe detection and create OpenPose-style annotation using modular detectors
         
         Args:
             image: Input image
@@ -518,57 +709,88 @@ class MediaPipePosePreprocessor(BasePreprocessor):
         
         # Convert to RGB numpy array for MediaPipe
         rgb_image = cv2.cvtColor(np.array(image_resized), cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
         
-        # Run MediaPipe detection
-        results = self.detector.process(rgb_image)
+        # Increment timestamp for video mode
+        self._current_timestamp_ms += 1
         
-        # Create black background for pose annotation
+        # Create black background for annotation
         pose_image = np.zeros((detect_resolution, detect_resolution, 3), dtype=np.uint8)
         
-        # Draw pose skeleton if detected
-        if results.pose_landmarks:
-            # Convert MediaPipe to OpenPose format
-            openpose_keypoints = self._mediapipe_to_openpose(
-                results.pose_landmarks.landmark, 
-                detect_resolution, 
-                detect_resolution
-            )
+        # Process with pose detector if enabled
+        if self.pose_detector:
+            with profile_span("pose_detector.detect"):
+                running_mode = self.params['running_mode'].upper()
+                if running_mode == 'VIDEO':
+                    pose_result = self.pose_detector.detect_for_video(mp_image, self._current_timestamp_ms)
+                elif running_mode == 'LIVE_STREAM':
+                    # For live stream mode, we use detect_async and results will be handled by callback
+                    self.pose_detector.detect_async(mp_image, self._current_timestamp_ms)
+                    pose_result = self._latest_pose_result
+                else:  # IMAGE mode
+                    pose_result = self.pose_detector.detect(mp_image)
             
-            # Apply TouchDesigner-style smoothing
-            openpose_keypoints = self._apply_smoothing(openpose_keypoints, "main_pose")
-            
-            # Draw OpenPose-style skeleton
-            pose_image = self._draw_openpose_skeleton(pose_image, openpose_keypoints)
-        
-        # Draw hands if enabled
-        draw_hands = self.params.get('draw_hands', True)
-        if draw_hands:
-            if results.left_hand_landmarks:
-                pose_image = self._draw_hand_keypoints(
-                    pose_image, results.left_hand_landmarks.landmark, is_left_hand=True
+            if pose_result.pose_landmarks:
+                # Convert first pose to OpenPose format (currently supporting single pose)
+                openpose_keypoints = self._mediapipe_to_openpose(
+                    pose_result.pose_landmarks[0],
+                    detect_resolution,
+                    detect_resolution
                 )
-            
-            if results.right_hand_landmarks:
-                pose_image = self._draw_hand_keypoints(
-                    pose_image, results.right_hand_landmarks.landmark, is_left_hand=False
-                )
+                
+                # Apply TouchDesigner-style smoothing
+                openpose_keypoints = self._apply_smoothing(openpose_keypoints, "main_pose")
+                
+                # Draw OpenPose-style skeleton
+                pose_image = self._draw_openpose_skeleton(pose_image, openpose_keypoints)
         
-        # Draw face if enabled
-        draw_face = self.params.get('draw_face', False)
-        if draw_face and results.face_landmarks:
-            pose_image = self._draw_face_keypoints(
-                pose_image, results.face_landmarks.landmark
-            )
+        # Process with face detector if enabled
+        if self.face_detector:
+            with profile_span("face_detector.detect"):
+                running_mode = self.params['running_mode'].upper()
+                if running_mode == 'VIDEO':
+                    face_result = self.face_detector.detect_for_video(mp_image, self._current_timestamp_ms)
+                elif running_mode == 'LIVE_STREAM':
+                    # For live stream mode, we use detect_async and results will be handled by callback
+                    self.face_detector.detect_async(mp_image, self._current_timestamp_ms)
+                    face_result = self._latest_face_result
+                else:  # IMAGE mode
+                    face_result = self.face_detector.detect(mp_image)
+                    
+                if face_result.face_landmarks:
+                    # Draw face landmarks for the first detected face
+                    pose_image = self._draw_face_keypoints(pose_image, face_result.face_landmarks[0])
         
-        # Convert back to PIL
-        pose_pil = Image.fromarray(cv2.cvtColor(pose_image, cv2.COLOR_BGR2RGB))
+        # Process with hand detector if enabled
+        if self.hand_detector:
+            with profile_span("hand_detector.detect"):
+                running_mode = self.params['running_mode'].upper()
+                if running_mode == 'VIDEO':
+                    hand_result = self.hand_detector.detect_for_video(mp_image, self._current_timestamp_ms)
+                elif running_mode == 'LIVE_STREAM':
+                    # For live stream mode, we use detect_async and results will be handled by callback
+                    self.hand_detector.detect_async(mp_image, self._current_timestamp_ms)
+                    hand_result = self._latest_hand_result
+                else:  # IMAGE mode
+                    hand_result = self.hand_detector.detect(mp_image)
+                    
+                if hand_result.hand_landmarks:
+                    # Draw each detected hand
+                    for idx, (landmarks, handedness) in enumerate(zip(hand_result.hand_landmarks, hand_result.handedness)):
+                        is_left = handedness[0].category_name.lower() == 'left'
+                        pose_image = self._draw_hand_keypoints(pose_image, landmarks, is_left)
         
-        # Resize to target resolution
+        # Resize to output resolution if different
         image_resolution = self.params.get('image_resolution', 512)
-        if pose_pil.size != (image_resolution, image_resolution):
-            pose_pil = pose_pil.resize((image_resolution, image_resolution), Image.LANCZOS)
+        if image_resolution != detect_resolution:
+            pose_image = cv2.resize(
+                pose_image,
+                (image_resolution, image_resolution),
+                interpolation=cv2.INTER_AREA
+            )
         
-        return pose_pil
+        # Convert to PIL Image for output
+        return Image.fromarray(pose_image)
     
     def process_tensor(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """
@@ -587,10 +809,27 @@ class MediaPipePosePreprocessor(BasePreprocessor):
     
     def reset_smoothing_buffers(self):
         """Reset smoothing buffers (useful for new sequences)"""
-        print("MediaPipePosePreprocessor.reset_smoothing_buffers: Clearing smoothing buffers")
+        logger.debug("MediaPipePosePreprocessor.reset_smoothing_buffers: Clearing smoothing buffers")
         self._smoothing_buffers.clear()
     
     def __del__(self):
-        """Cleanup MediaPipe detector"""
+        """Cleanup MediaPipe detectors"""
+        # Clean up pose detector
+        if hasattr(self, '_pose_detector') and self._pose_detector is not None:
+            self._pose_detector.close()
+            self._pose_detector = None
+            
+        # Clean up face detector
+        if hasattr(self, '_face_detector') and self._face_detector is not None:
+            self._face_detector.close()
+            self._face_detector = None
+            
+        # Clean up hand detector
+        if hasattr(self, '_hand_detector') and self._hand_detector is not None:
+            self._hand_detector.close()
+            self._hand_detector = None
+            
+        # Clean up legacy detector (backward compatibility)
         if hasattr(self, '_detector') and self._detector is not None:
-            self._detector.close() 
+            self._detector.close()
+            self._detector = None

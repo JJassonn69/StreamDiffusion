@@ -1,4 +1,4 @@
-model_id: "C:\\_dev\\comfy\\ComfyUI\\models\\checkpoints\\sd_turbo.safetensors"
+model_id: "/home/user/models/ComfyUI--models/checkpoints/sd_turbo.safetensors"
 t_index_list: [24,27]
 width: 512
 height: 512
@@ -30,16 +30,44 @@ controlnets:
     conditioning_scale: 0.711
     preprocessor: "mediapipe_pose"
     preprocessor_params:
+      # General parameters
       detect_resolution: 512
       image_resolution: 512
-      min_detection_confidence: 0.5
-      min_tracking_confidence: 0.5
-      model_complexity: 1
-      static_image_mode: false
-      draw_hands: true
-      draw_face: true
+      running_mode: "VIDEO"  # Options: IMAGE, VIDEO, LIVE_STREAM
+
+      # Pose detector parameters
+      enable_pose: false
+      pose_model_path: null  # Optional, uses default MediaPipe model if not specified
+      pose_min_detection_confidence: 0.5
+      pose_min_tracking_confidence: 0.5
+      pose_model_complexity: 1
+      num_poses: 1
+
+      # Face detector parameters
+      enable_face: true
+      face_model_path: null
+      face_min_detection_confidence: 0.5
+      face_min_tracking_confidence: 0.5
+      face_model_complexity: 1
+      num_faces: 1
+      output_face_blendshapes: false
+
+      # Hand detector parameters
+      enable_hands: true
+      hand_model_path: null
+      hand_min_detection_confidence: 0.5
+      hand_min_tracking_confidence: 0.5
+      hand_model_complexity: 1
+      num_hands: 2
+
+      # Drawing parameters
       line_thickness: 2
       circle_radius: 3
+      confidence_threshold: 0.3
+
+      # Smoothing parameters
+      enable_smoothing: true
+      smoothing_factor: 0.5
     enabled: true 
 
   # - model_id: "thibaud/controlnet-sd21-depth-diffusers"

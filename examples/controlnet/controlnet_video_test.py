@@ -20,6 +20,11 @@ import shutil
 import json
 from collections import deque
 
+import logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+)
 
 def create_wrapper_from_config(config, resolution):
     """Create StreamDiffusionWrapper from config"""
